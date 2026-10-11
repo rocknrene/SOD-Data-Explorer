@@ -4,6 +4,30 @@
 
 Restructured from a single-file application into a tested package.
 
+### GSA testing fixes (testing matrix of 2026-10-08/09)
+- Server runs one process with eight threads, so a long archive request no
+  longer freezes the page for every user; loaded tables are kept on the
+  server and only a key is sent to the browser, so chart changes are fast.
+- Site and Hole menus are filled in the browser and update immediately.
+- "Working on it" message over the chart and table during fetches, merges,
+  and redraws; dot indicator under Merge datasets.
+- Merged view: "Paired samples only" (default) or "All samples of A" for the
+  chart, table, and download; merge depth is the default depth axis; Dataset
+  B columns are always offered; a warning when nothing pairs; DSDP depths are
+  labeled mbsf; replacing A or B clears the previous merge.
+- Expedition filter removes rows holding any unselected Expedition, so it
+  acts on both datasets of a merge.
+- Data table pages through up to 5,000 rows (previously the first 200).
+- Thicker lines, larger points, chart names ("Depth plots", "Cross-plot (two
+  columns)", "Depth plot, dual axis"), axis-picker labels for two-column
+  charts, solid lines on the dual-axis plot, clearer chart help text.
+- Number fields' +/- buttons no longer clear the value (Dash 4.4 min/max
+  issue); default window 10 m, with advice when the window is too short.
+- Section offsets ("Top (cm)", "Bottom (cm)") are no longer default columns.
+- RGB requires a Site; requests over 300,000 rows are refused with advice.
+- Shipboard tab carries an under-development notice; Dataset help lists DSDP,
+  ODP, IODP in order.
+
 ### Report types (data-type table by L. Childress)
 - Report menu rebuilt from the cross-program "SOD Data Types" table: sixteen
   generic names in three categories replace the previous LIMS and DSDP lists.
