@@ -137,3 +137,21 @@ def program_from_number(expedition: str) -> str | None:
     if number >= 301:
         return "IODP"
     return None
+
+
+def reference_menu_data() -> dict:
+    """Sites and Holes of every Leg/Expedition, for the Site and Hole menus filled in the browser.
+
+    The structure is ``{expedition: [[site, [[hole, label], ...]], ...]}``, with
+    lists rather than objects so that the natural sort order is preserved. The
+    ordering matches :func:`sites_for_expedition` and :func:`holes_for_site`.
+    """
+    table = REFERENCE[REFERENCE["Site"] != ""]
+    holes: dict[tuple[str, str], list[str]] = {}
+    for (expedition, site), group in table.groupby(["Exp", "Site"], sort=False):
+        holes[(expedition, site)] = sorted(h for h in group["Hole"].unique() if h != "")
+    data: dict[str, list] = {e: [] for e in ALL_EXPEDITIONS}
+    for (expedition, site) in sorted(holes, key=lambda k: natural_sort_key(k[1])):
+        data.setdefault(expedition, []).append(
+            [site, [[h, hole_display_label(h)] for h in holes[(expedition, site)]]])
+    return data

@@ -83,6 +83,9 @@ _OTHER_IDENTIFIER_PATTERNS = [
         r"^(analyst|user|comments?)$",
         r"comment",
         r"^(sample|interval)( ?(top|bottom|label|name))?$",
+        # Positions of a sample within its section (DSDP and ODP "Top (cm)", "Bottom (cm)").
+        r"^(top|bottom|bot)( ?(interval|offset))?$",
+        r"^interval ?(top|bottom|bot)$",
     )
 ]
 

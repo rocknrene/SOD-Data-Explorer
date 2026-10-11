@@ -142,3 +142,8 @@ def test_dsdp_sample_depth_preferred_over_interval_and_core_depths():
                        "top of core depth (m)": [0.0], "sample depth (m)": [4.89],
                        "porosity": [63.53]})
     assert columns.find_depth_column(df) == "sample depth (m)"
+
+
+def test_sample_position_within_section_is_not_a_measurement():
+    df = pd.DataFrame({"Top (cm)": [1.0], "Bottom (cm)": [2.0], "Depth (mbsf)": [3.0], "Porosity (%)": [50.0]})
+    assert columns.measurement_columns(df) == ["Porosity (%)"]

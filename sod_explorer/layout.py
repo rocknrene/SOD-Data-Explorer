@@ -19,7 +19,7 @@ from __future__ import annotations
 from dash import dcc, html
 
 from . import __version__
-from .reference import ALL_EXPEDITIONS
+from .reference import ALL_EXPEDITIONS, reference_menu_data
 from .sources.catalog import menu_options
 from .theme import (
     CARD,
@@ -33,6 +33,9 @@ from .theme import (
     button,
     css_variables,
 )
+
+# Number inputs carry no min or max: in Dash 4.4 either one makes the input's
+# +/- buttons clear the value. Values are validated by the callbacks that use them.
 
 ACCEPTED_DATA = ".csv  .tsv  .txt  .xlsx  .xls  .las  .zip"
 ACCEPTED_LITHOLOGY = ".csv  .tsv  .xlsx  .zip"
@@ -96,6 +99,14 @@ INDEX_STRING = """<!DOCTYPE html>
   .info-summary::-webkit-details-marker { display:none; }
   .info-icon { font-size:13px; letter-spacing:0; color:var(--accent); padding-left:8px; }
   details[open] > .info-summary .info-icon { color:var(--text); }
+  .sod-busy { background:var(--panel); color:var(--text); border:1px solid var(--accent);
+    border-radius:8px; padding:14px 22px; font-size:13px; box-shadow:0 4px 18px rgba(0,0,0,0.35);
+    text-align:center; }
+  .sod-busy-dots span { display:inline-block; width:8px; height:8px; margin:0 3px; border-radius:50%;
+    background:var(--accent); animation:sod-bounce 1.2s infinite ease-in-out both; }
+  .sod-busy-dots span:nth-child(2) { animation-delay:0.15s; }
+  .sod-busy-dots span:nth-child(3) { animation-delay:0.3s; }
+  @keyframes sod-bounce { 0%, 80%, 100% { transform:scale(0.4); opacity:0.4; } 40% { transform:scale(1); opacity:1; } }
 </style>
 </head>
 <body>
@@ -126,6 +137,16 @@ CONTROL_LABEL = {**LABEL, "marginTop": "0"}
 STATUS_BOX = {"flex": "1", "background": "var(--panel)", "border": "1px solid var(--border)",
               "borderRadius": "6px", "padding": "10px 14px", "fontSize": "12px",
               "color": "var(--muted)", "minWidth": "200px"}
+
+
+def busy_message(text: str = "Working on it. Large requests can take a minute or two.") -> html.Div:
+    """Message shown over a chart or table while the server is preparing it."""
+    return html.Div([html.Div([html.Span(), html.Span(), html.Span()], className="sod-busy-dots",
+                              style={"marginBottom": "8px"}),
+                     html.Div(text)], className="sod-busy")
+
+
+BUSY_OVERLAY = {"visibility": "visible", "opacity": 0.35}
 
 
 def upload_dropzone(component_id: str, label: str, accepted: str, compact: bool = False,
@@ -248,7 +269,7 @@ def shipboard_sidebar() -> html.Div:
                                    {"label": " Samples with comments", "value": "flags"},
                                    {"label": " Core tops (shallowest sample)", "value": "core_tops"}]),
             html.Div("Gap threshold (m)", style={**LABEL, "marginTop": "4px"}),
-            dcc.Input(id="gap-threshold", type="number", value=5.0, min=0.01, step="any", style=INPUT),
+            dcc.Input(id="gap-threshold", type="number", value=5.0, step=1, style=INPUT),
         ]),
 
         html.Div(id="axis-options", children=[
@@ -266,6 +287,11 @@ def shipboard_sidebar() -> html.Div:
 def shipboard_tab() -> html.Div:
     """Shipboard tab: metadata banner, sidebar, summary cards, chart, and data table."""
     return html.Div([
+        html.Div("The Shipboard tab is still under development and has not been fully tested. "
+                 "You may encounter unexpected errors here; the Legacy Data tab is the tested part "
+                 "of this release.",
+                 style={"background": "var(--panel)", "color": "var(--warn)", "fontSize": "12px",
+                        "padding": "8px 20px", "borderBottom": "1px solid var(--warn)", "fontFamily": FONT}),
         html.Div(id="meta-banner"),
         html.Div([
             shipboard_sidebar(),
@@ -273,7 +299,10 @@ def shipboard_tab() -> html.Div:
                 html.Div(id="kpi-bar", style={"display": "flex", "gap": "10px", "padding": "10px 18px",
                                               "borderBottom": "1px solid var(--border)",
                                               "flexWrap": "wrap"}),
-                html.Div(dcc.Graph(id="main-chart", config={"displayModeBar": True, "scrollZoom": True}),
+                html.Div(dcc.Loading(dcc.Graph(id="main-chart",
+                                               config={"displayModeBar": True, "scrollZoom": True}),
+                                     custom_spinner=busy_message(), overlay_style=BUSY_OVERLAY,
+                                     delay_show=400),
                          style={"padding": "10px 18px"}),
                 html.Div([
                     html.Div([
@@ -294,13 +323,13 @@ def shipboard_tab() -> html.Div:
 # ---------------------------------------------------------------------------
 
 _SOURCE_NOTE = (
-    "Select a Leg or Expedition; the archive is chosen automatically. DSDP Legs are retrieved "
-    "from the DSDP Data Access application (or PANGAEA for a few data types); JOIDES Resolution "
-    "expeditions from LORE (LIMS data, Expedition 317 onward); Chikyu and Mission-Specific "
-    "Platform expeditions from PANGAEA. ODP Legs are retrieved from the NOAA NCEI archive, one "
-    "Hole at a time; IODP Expeditions 301 to 312 may require file upload. Report types use one "
-    "generic name across programs; a "
-    "type with no DSDP equivalent returns no DSDP data."
+    "Select a Leg or Expedition; the archive is chosen automatically. DSDP: Legs are retrieved "
+    "from the DSDP Data Access application (or PANGAEA for a few data types). ODP: Legs are "
+    "retrieved from the NOAA NCEI archive, one Hole at a time. IODP: JOIDES Resolution "
+    "expeditions are retrieved from LORE (LIMS data, Expedition 317 onward); Chikyu and "
+    "Mission-Specific Platform expeditions from PANGAEA; Expeditions 301 to 312 may require file "
+    "upload. Report types use one generic name across programs; a type with no DSDP equivalent "
+    "returns no DSDP data."
 )
 
 
@@ -355,8 +384,13 @@ _MERGE_NOTE = (
     "each dataset above the chart before merging."
 )
 _CHART_NOTE = (
-    "The cross-plot and dual-axis overlay compare two columns: the first two selected columns in "
-    "single-dataset view, or the first column of A and of B in merged view."
+    "Depth plots: each selected column against depth. Cross-plot: one column against another, "
+    "with points colored by depth, a least-squares line, and the Pearson correlation coefficient "
+    "(r) of the two columns, tested for significance with an effective sample size that allows "
+    "for samples close in depth being similar. Depth plot, dual axis: two columns against depth "
+    "on separate value axes. Depth-window mean: each column with its average over a sliding "
+    "depth window. Two-column charts use the first two columns selected (single dataset) or the "
+    "first column of A and of B (merged)."
 )
 _DETREND_NOTE = (
     "Properties that both change with depth (for example, through compaction) correlate through "
@@ -381,7 +415,7 @@ def legacy_sidebar() -> html.Div:
             dataset_panel("b"),
             section_label("DEPTH MERGE", _MERGE_NOTE, marginTop="0"),
             html.Div("Tolerance (cm)", style={**LABEL, "marginTop": "4px"}),
-            dcc.Input(id="pe-tolerance", value=2, type="number", min=0, max=500, step="any", style=INPUT),
+            dcc.Input(id="pe-tolerance", value=2, type="number", step=1, style=INPUT),
             dcc.Checklist(id="pe-merge-opts", value=["one_to_one"],
                           labelStyle={**CHECK_LABEL, "marginTop": "8px"}, inputStyle=CHECK_INPUT,
                           options=[{"label": " Use each B sample at most once", "value": "one_to_one"},
@@ -390,14 +424,17 @@ def legacy_sidebar() -> html.Div:
                                     "value": "across_holes"}]),
             html.Button("Merge datasets", id="pe-merge-btn", n_clicks=0,
                         style={**button("var(--accent2)"), "fontSize": "12px"}),
+            dcc.Loading(html.Div(id="pe-merge-busy", style={"fontSize": "10px", "marginTop": "4px",
+                                                            "minHeight": "4px"}),
+                        type="dot", color="var(--accent2)"),
         ]),
 
         html.Hr(style={**DIVIDER, "margin": "10px 0"}),
         section_label("CHART", _CHART_NOTE),
         dcc.RadioItems(id="pe-chart-mode", value="tracks", labelStyle=CHECK_LABEL, inputStyle=CHECK_INPUT,
-                       options=[{"label": " Depth tracks", "value": "tracks"},
-                                {"label": " Cross-plot with correlation", "value": "scatter"},
-                                {"label": " Dual-axis overlay", "value": "dual"},
+                       options=[{"label": " Depth plots", "value": "tracks"},
+                                {"label": " Cross-plot (two columns)", "value": "scatter"},
+                                {"label": " Depth plot, dual axis", "value": "dual"},
                                 {"label": " Depth-window mean", "value": "rolling"}]),
         html.Div(id="pe-detrend-ctrl", style={"display": "none"}, children=[
             section_label("TREND", _DETREND_NOTE, marginTop="8px"),
@@ -406,7 +443,8 @@ def legacy_sidebar() -> html.Div:
         ]),
         html.Div(id="pe-rolling-ctrl", style={"display": "none"}, children=[
             section_label("WINDOW (m)", _WINDOW_NOTE, marginTop="8px"),
-            dcc.Input(id="pe-rolling-window", value=3, type="number", min=0.01, step="any", style=INPUT),
+            dcc.Input(id="pe-rolling-window", value=10, type="number", step=1, debounce=True,
+                      style=INPUT),
         ]),
     ], style={"width": "270px", "minWidth": "270px", "background": "var(--panel)",
               "borderRight": "1px solid var(--border)", "padding": "18px"})
@@ -440,6 +478,15 @@ def legacy_tab() -> html.Div:
                               labelStyle={"display": "inline-block", "margin": "3px 8px 3px 0",
                                           "color": "var(--muted)", "fontSize": "11px"}),
                 html.Div(id="pe-exp-hint", style={**HINT, "fontStyle": "italic"}),
+                html.Div(id="pe-rows-container", style={"display": "none"}, children=[
+                    dcc.RadioItems(id="pe-rows", value="paired", inline=True,
+                                   labelStyle={"marginRight": "16px", "color": "var(--muted)",
+                                               "fontSize": "11px"},
+                                   inputStyle={"marginRight": "6px", "accentColor": "var(--accent2)"},
+                                   options=[{"label": "Paired samples only", "value": "paired"},
+                                            {"label": "All samples of A (unpaired B left blank)",
+                                             "value": "all"}]),
+                ]),
             ], style={**CARD, "marginBottom": "12px"}),
             html.Div([
                 html.Div([html.P("MERGE DEPTH, A", style=CONTROL_LABEL),
@@ -450,19 +497,30 @@ def legacy_tab() -> html.Div:
                           dcc.Dropdown(id="pe-depth-b", options=[], placeholder="auto-detect",
                                        style=DROPDOWN)], id="pe-depth-b-container",
                          style={**CONTROL_ITEM, "display": "none"}),
-                html.Div([html.P("DEPTH AXIS", style=CONTROL_LABEL),
+                html.Div([html.P("DEPTH AXIS", id="pe-xaxis-lbl", style=CONTROL_LABEL),
                           dcc.Dropdown(id="pe-xaxis", options=[], style=DROPDOWN)], style=CONTROL_ITEM),
                 html.Div([html.P("COLUMNS", id="pe-yaxis-lbl", style=CONTROL_LABEL),
                           dcc.Dropdown(id="pe-yaxis", options=[], multi=True, style=DROPDOWN)],
                          style={**CONTROL_ITEM, "flex": "2 1 240px"}),
                 html.Div(id="pe-ycols-b-container", children=[
-                    html.P("DATASET B COLUMNS", style=CONTROL_LABEL),
+                    html.P("DATASET B COLUMNS", id="pe-ycols-b-lbl", style=CONTROL_LABEL),
                     dcc.Dropdown(id="pe-ycols-b", options=[], multi=True, style=DROPDOWN)],
                     style={"display": "none"}),
             ], style={**CARD, "display": "flex", "flexWrap": "wrap", "gap": "12px",
                       "alignItems": "flex-end", "marginBottom": "12px"}),
-            dcc.Graph(id="pe-chart", config={"displayModeBar": True, "scrollZoom": True}),
-            html.Div(id="pe-table-container", style={"marginTop": "16px"}),
+            # The busy message covers the chart and table while data are retrieved, merged, or
+            # drawn. The stores are inside the Loading component so that a pending fetch or merge
+            # (whose output is a store) also shows it.
+            dcc.Loading(
+                children=[
+                    dcc.Graph(id="pe-chart", config={"displayModeBar": True, "scrollZoom": True}),
+                    html.Div(id="pe-table-container", style={"marginTop": "16px"}),
+                    dcc.Store(id="pe-store-a"), dcc.Store(id="pe-store-b"), dcc.Store(id="pe-merged-store"),
+                ],
+                target_components={"pe-chart": "figure", "pe-table-container": "children",
+                                    "pe-store-a": "data", "pe-store-b": "data", "pe-merged-store": "data"},
+                custom_spinner=busy_message(), overlay_style=BUSY_OVERLAY, delay_show=400,
+                parent_style={"position": "relative"}),
         ], style={"flex": "1", "padding": "16px", "minWidth": "320px"}),
     ], style={"display": "flex", "flexWrap": "wrap", "flex": "1"})
 
@@ -501,7 +559,7 @@ def build_layout() -> html.Div:
         dcc.Store(id="theme-store", storage_type="local", data="dark"),
         dcc.Store(id="store-df"), dcc.Store(id="store-meta"), dcc.Store(id="store-litho"),
         dcc.Store(id="store-site-info"),
-        dcc.Store(id="pe-store-a"), dcc.Store(id="pe-store-b"), dcc.Store(id="pe-merged-store"),
+        dcc.Store(id="pe-ref-store", data=reference_menu_data()),
         dcc.Store(id="pe-prov-a"), dcc.Store(id="pe-prov-b"), dcc.Store(id="pe-prov-merged"),
     ], style={"minHeight": "100vh", "display": "flex", "flexDirection": "column",
               "background": "var(--bg)", "color": "var(--text)", "fontFamily": FONT})

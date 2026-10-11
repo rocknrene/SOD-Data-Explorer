@@ -117,6 +117,27 @@ def _suffix_columns(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
     return df.rename(columns={c: f"{c}{suffix}" for c in df.columns})
 
 
+# Columns that every merged table starts with (see :func:`merge_by_depth`).
+MERGE_DEPTH_PREFIX = "merge depth"
+OFFSET_COLUMN = "depth_offset_m"
+
+
+def merge_depth_column(merged: pd.DataFrame) -> str | None:
+    """Name of the merge-depth column of a merged table, or ``None`` if it has none."""
+    return next((c for c in merged.columns if str(c).startswith(MERGE_DEPTH_PREFIX)), None)
+
+
+def paired_rows(merged: pd.DataFrame) -> pd.DataFrame:
+    """Rows of a merged table in which a B sample was paired with the A sample.
+
+    A table without a depth-offset column (not a merged table) is returned
+    unchanged.
+    """
+    if OFFSET_COLUMN not in merged.columns:
+        return merged
+    return merged[merged[OFFSET_COLUMN].notna()]
+
+
 def merge_by_depth(
     dfa: pd.DataFrame,
     dfb: pd.DataFrame,
@@ -126,6 +147,8 @@ def merge_by_depth(
     allow_mixed_scales: bool = False,
     one_to_one: bool = True,
     across_holes: bool = False,
+    assumed_scale_a: str | None = None,
+    assumed_scale_b: str | None = None,
 ) -> tuple[pd.DataFrame, MergeReport]:
     """Pair samples of two datasets by depth within a tolerance.
 
@@ -173,6 +196,9 @@ def merge_by_depth(
         Enforce that each B sample is paired with at most one A sample.
     across_holes
         Pair on depth alone, ignoring Site and Hole.
+    assumed_scale_a, assumed_scale_b
+        Depth scale to use when a header names none, because the source
+        defines it (DSDP depths are meters below seafloor, "mbsf").
 
     Returns
     -------
@@ -199,7 +225,8 @@ def merge_by_depth(
     warnings: list[str] = []
 
     # 1. Depth scales.
-    scale_a, scale_b = depth_scale(depth_column_a), depth_scale(depth_column_b)
+    scale_a = depth_scale(depth_column_a) or assumed_scale_a
+    scale_b = depth_scale(depth_column_b) or assumed_scale_b
     canon_a, canon_b = canonical_scale(scale_a), canonical_scale(scale_b)
     if canon_a and canon_b and canon_a != canon_b:
         message = (f"Dataset A depths are on {scale_a} and dataset B depths are on {scale_b}. "
@@ -298,13 +325,19 @@ def merge_by_depth(
         merged.loc[losers, "_offset"] = np.nan
         matched = merged["_row_b"].notna()
 
-    merge_depth_name = f"merge depth {scale_a or 'unknown scale'} (m)"
-    merged.insert(0, "depth_offset_m", merged["_depth_b_m"] - merged["_depth_m"])
+    merge_depth_name = (f"{MERGE_DEPTH_PREFIX} {scale_a} (m)" if scale_a
+                        else f"{MERGE_DEPTH_PREFIX} (m)")
+    # Rounded to 1 micrometer, which removes floating-point residue such as 0.010000000000000231.
+    merged.insert(0, OFFSET_COLUMN, (merged["_depth_b_m"] - merged["_depth_m"]).round(6))
     merged.insert(0, merge_depth_name, merged["_depth_m"])
     sort_keys = (["_group"] if grouping != "none" else []) + ["_depth_m"]
     merged = merged.sort_values(sort_keys, kind="mergesort")
     median_offset = float(merged.loc[matched, "_offset"].median()) if matched.any() else None
     merged = merged.drop(columns=[c for c in merged.columns if c.startswith("_")]).reset_index(drop=True)
+
+    if not matched.any():
+        warnings.append(f"No sample of B lies within {tolerance_m * 100:g} cm of a sample of A. "
+                        "Increase the tolerance, or check that the depth columns are on the same scale.")
 
     report = MergeReport(
         rows_a=int(len(dfa)), rows_b=int(len(dfb)),
@@ -719,12 +752,13 @@ def expedition_values(df: pd.DataFrame) -> list[str]:
 
 
 def filter_expeditions(df: pd.DataFrame, selected: list[str] | None) -> pd.DataFrame:
-    """Keep rows whose Expedition is in ``selected``.
+    """Keep rows whose Expeditions are all in ``selected``.
 
-    Rows are kept if any Expedition column of the table (both ``_A`` and
-    ``_B`` columns in a merged table) matches. A table without an
-    Expedition column, or a selection of ``None``, is returned unchanged;
-    an empty selection returns no rows.
+    A row is kept only if every Expedition value it holds is selected; in a
+    merged table, unselecting the Expedition of dataset A or of dataset B
+    therefore removes the rows that contain it. Rows with no Expedition
+    value are kept. A table without an Expedition column, or a selection of
+    ``None``, is returned unchanged; an empty selection returns no rows.
     """
     if selected is None:
         return df
@@ -732,7 +766,11 @@ def filter_expeditions(df: pd.DataFrame, selected: list[str] | None) -> pd.DataF
     columns = [c for c in df.columns if find_identifier_column(df[[c]], "expedition") is not None]
     if not columns:
         return df
-    keep = pd.Series(False, index=df.index)
+    if not wanted:
+        return df.iloc[0:0]
+    keep = pd.Series(True, index=df.index)
     for column in columns:
-        keep |= df[column].map(normalize_identifier).isin(wanted)
+        values = df[column]
+        present = values.notna() & (values.astype(str).str.strip() != "")
+        keep &= ~present | values.map(normalize_identifier).isin(wanted)
     return df[keep]

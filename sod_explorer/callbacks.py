@@ -2,19 +2,29 @@
 
 Callbacks translate interface events into calls to the parsing, source,
 analysis, and plotting modules; they contain no scientific logic of their
-own. Tables are held in ``dcc.Store`` components as JSON (pandas "split"
-orientation); provenance records are held alongside them.
+own. Tables are held in a server-side cache and ``dcc.Store`` components
+hold only their keys (see :func:`to_store`); provenance records, which are
+small, are held in the stores directly.
 """
 
 from __future__ import annotations
 
-import io
+import threading
+import uuid
+from collections import OrderedDict
 
 import pandas as pd
 from dash import ALL, Input, Output, State, ctx, dash_table, dcc, html, no_update
 
 from . import provenance
-from .analysis import MergeError, expedition_values, filter_expeditions, merge_by_depth
+from .analysis import (
+    MergeError,
+    expedition_values,
+    filter_expeditions,
+    merge_by_depth,
+    merge_depth_column,
+    paired_rows,
+)
 from .columns import depth_columns, find_depth_column, measurement_columns
 from .parsing import ParseError, decode_upload, parse_file, resolve_lithology_columns, summarize_site
 from .plotting import (
@@ -29,35 +39,80 @@ from .plotting import (
     smoothed_figure,
     tracks_figure,
 )
-from .reference import hole_display_label, holes_for_site, sites_for_expedition
 from .sources import pangaea, routing
 from .sources.common import SourceError
 from .theme import CARD, DATA_FONT, DROPDOWN, FONT, LABEL
 
-TABLE_PREVIEW_ROWS = 200
+TABLE_PREVIEW_ROWS = 5000
+TABLE_PAGE_SIZE = 25
+
+# Largest table accepted from an archive request. Larger requests exhaust the
+# memory of small hosting instances and cannot be plotted usefully in a browser.
+MAX_FETCH_ROWS = 300_000
+
+# Report types whose whole-expedition requests are too large to retrieve
+# (RGB image color data run to millions of rows per expedition).
+SITE_REQUIRED_REPORTS = {"rgb"}
+
+# Loaded tables are kept in server memory, and the browser holds only a random
+# key for each. Sending whole tables between browser and server as JSON on every
+# interaction made chart changes slow for large tables. The cache is per
+# process, so the server must run a single process (threads are fine; see the
+# Dockerfile). Keys are random UUIDs, so one user's tables cannot be
+# reached from another session. The least recently used tables are evicted
+# when either limit below is exceeded.
+CACHE_MAX_TABLES = 48
+CACHE_MAX_BYTES = 200 * 1024 ** 2
+_cache: OrderedDict[str, pd.DataFrame] = OrderedDict()
+_cache_bytes: dict[str, int] = {}
+_cache_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# Serialization and small helpers
+# Table cache and small helpers
 # ---------------------------------------------------------------------------
 
 def to_store(df: pd.DataFrame | None) -> str | None:
-    """Serialize a table for a ``dcc.Store``."""
-    return None if df is None else df.to_json(orient="split", date_format="iso", double_precision=15)
-
-
-def from_store(data: str | None) -> pd.DataFrame | None:
-    """Deserialize a table from a ``dcc.Store``.
-
-    Type and date inference are disabled so that identifiers such as
-    ``"0019"`` remain text, and ``precise_float`` is enabled so that decimal
-    values are restored exactly (the default fast parser can alter the last
-    significant digits, e.g. 1.503 becomes 1.5030000000000001).
-    """
-    if not data:
+    """Put a table in the server cache and return the key to hold in a ``dcc.Store``."""
+    if df is None:
         return None
-    return pd.read_json(io.StringIO(data), orient="split", dtype=False, convert_dates=False,
-                        precise_float=True)
+    key = uuid.uuid4().hex
+    table = df.copy()
+    size = int(table.memory_usage(index=True, deep=False).sum())
+    with _cache_lock:
+        _cache[key] = table
+        _cache_bytes[key] = size
+        while len(_cache) > 1 and (len(_cache) > CACHE_MAX_TABLES
+                                   or sum(_cache_bytes.values()) > CACHE_MAX_BYTES):
+            oldest, _ = _cache.popitem(last=False)
+            _cache_bytes.pop(oldest, None)
+    return key
+
+
+def from_store(key: str | None) -> pd.DataFrame | None:
+    """Return a copy of the cached table for a ``dcc.Store`` value.
+
+    Returns ``None`` if no table was stored, or if the table has left the
+    cache (the server restarted, or many newer tables were loaded); the
+    interface then behaves as if nothing had been loaded. A copy is returned
+    so that a callback cannot alter the cached table.
+    """
+    if not key:
+        return None
+    with _cache_lock:
+        df = _cache.get(key)
+        if df is not None:
+            _cache.move_to_end(key)
+    return None if df is None else df.copy()
+
+
+def _positive(value, default: float) -> float:
+    """``value`` as a positive number, or ``default`` if it is empty, invalid, or not positive."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
 
 
 def _active(mode, merged, a, b):
@@ -78,13 +133,16 @@ def _message(text, kind="info"):
 
 
 def data_table(df: pd.DataFrame, highlight_comments: bool = False) -> html.Div:
-    """Preview table of the first :data:`TABLE_PREVIEW_ROWS` rows.
+    """Paged table of the first :data:`TABLE_PREVIEW_ROWS` rows.
 
     The table scrolls in both directions inside one box whose scrollbars are
     always drawn (see the ``.dash-spreadsheet-container`` rules in the page
     stylesheet), so wide tables can be scrolled sideways without a trackpad.
     """
     preview = df.head(TABLE_PREVIEW_ROWS)
+    notes = [_row_count_text(len(df))]
+    if len(df.columns) > 14:
+        notes.append(f"{len(df.columns)} columns; scroll sideways to see all of them")
     conditional = [{"if": {"row_index": "odd"}, "backgroundColor": "var(--bg)"}]
     if highlight_comments:
         conditional += [{"if": {"filter_query": f"{{{c}}} != ''", "column_id": c}, "color": "var(--warn)"}
@@ -92,7 +150,7 @@ def data_table(df: pd.DataFrame, highlight_comments: bool = False) -> html.Div:
     table = dash_table.DataTable(
         data=preview.astype(object).where(preview.notna(), None).to_dict("records"),
         columns=[{"name": str(c), "id": str(c)} for c in preview.columns],
-        page_size=10, sort_action="native", filter_action="native",
+        page_size=TABLE_PAGE_SIZE, page_action="native", sort_action="native", filter_action="native",
         # One scroll container in both directions, so the horizontal scrollbar
         # stays at the bottom of the visible box rather than below the fold.
         style_table={"overflowX": "auto", "overflowY": "auto", "maxHeight": "420px",
@@ -104,9 +162,17 @@ def data_table(df: pd.DataFrame, highlight_comments: bool = False) -> html.Div:
                     "maxWidth": "160px", "overflow": "hidden", "textOverflow": "ellipsis"},
         style_data_conditional=conditional,
     )
-    caption = f"{len(df.columns)} columns; scroll sideways to see all of them" if len(df.columns) > 14 else ""
+    caption = "; ".join(notes)
     return html.Div([html.Div(caption, style={"color": "var(--muted)", "fontSize": "10px",
                                               "marginBottom": "4px", "fontFamily": FONT}), table])
+
+
+def _row_count_text(n_rows: int) -> str:
+    """Number of rows in a table, and whether the table display is truncated."""
+    if n_rows > TABLE_PREVIEW_ROWS:
+        return (f"showing the first {TABLE_PREVIEW_ROWS:,} of {n_rows:,} rows; "
+                "the download contains all rows")
+    return f"{n_rows:,} row" + ("" if n_rows == 1 else "s")
 
 
 def _format_depth_range(info: dict) -> str:
@@ -345,7 +411,7 @@ def _register_shipboard(app):
                 lithology_scale=litho.get("depth_scale") if litho else None,
                 show_gaps="gaps" in overlays, show_flags="flags" in overlays,
                 show_core_tops="core_tops" in overlays,
-                gap_threshold_m=float(gap_threshold) if gap_threshold else 5.0, theme=theme)
+                gap_threshold_m=_positive(gap_threshold, default=5.0), theme=theme)
         if chart_type == "heatmap":
             return heatmap_figure(df, theme)
         if chart_type == "histogram" and x:
@@ -363,8 +429,7 @@ def _register_shipboard(app):
         df = from_store(data)
         if df is None:
             return _message("No data loaded."), ""
-        return data_table(df, highlight_comments=True), \
-            f"showing first {min(len(df), TABLE_PREVIEW_ROWS):,} of {len(df):,} rows"
+        return data_table(df, highlight_comments=True), ""
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +449,12 @@ def _pangaea_choices(ds: str, candidates: list[dict]) -> html.Div:
     ])
 
 
+def _merge_cleared(ds: str) -> tuple:
+    """Clear a previous merge when dataset A or B is replaced, so a stale result is never shown."""
+    return None, html.Span(f"Dataset {ds.upper()} changed; click Merge datasets to merge again.",
+                           style={"color": "var(--warn)"})
+
+
 def _register_dataset(app, ds: str):
     """Callbacks of one dataset panel (``a`` or ``b``) of the Legacy Data tab."""
     @app.callback(Output(f"pe-{ds}-upload-panel", "style"), Output(f"pe-{ds}-database-panel", "style"),
@@ -395,78 +466,112 @@ def _register_dataset(app, ds: str):
 
     @app.callback(Output(f"pe-store-{ds}", "data"), Output(f"pe-prov-{ds}", "data"),
                   Output(f"pe-{ds}-upload-status", "children"),
+                  Output("pe-merged-store", "data", allow_duplicate=True),
+                  Output("pe-status-merged", "children", allow_duplicate=True),
                   Input(f"pe-{ds}-upload", "contents"), State(f"pe-{ds}-upload", "filename"),
                   prevent_initial_call=True)
     def load_upload(contents, filename):
         """Parse an uploaded file and store the table with an upload provenance record."""
         if not contents:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
         try:
             df, meta = parse_file(decode_upload(contents), filename)
         except ParseError as exc:
-            return None, None, _message(f"Error: {exc}", "error")
+            return None, None, _message(f"Error: {exc}", "error"), no_update, no_update
         text = f"{filename}: {len(df):,} rows"
         if meta.get("zip_member"):
             text += f"; read {meta['zip_member']} from the archive"
             if meta.get("zip_other_members"):
                 text += f" ({len(meta['zip_other_members'])} other table file(s) not used)"
-        return to_store(df), provenance.upload_record(meta, df), _message(text, "ok")
+        return to_store(df), provenance.upload_record(meta, df), _message(text, "ok"), *_merge_cleared(ds)
 
-    @app.callback(Output(f"pe-{ds}-site", "options"), Output(f"pe-{ds}-site", "value"),
-                  Output(f"pe-{ds}-hole", "options", allow_duplicate=True),
-                  Output(f"pe-{ds}-hole", "value", allow_duplicate=True),
-                  Input(f"pe-{ds}-exp", "value"), prevent_initial_call=True)
-    def site_options(expedition):
-        """List the Sites of the selected Leg/Expedition and clear the Hole menu."""
-        return _options(sites_for_expedition(expedition)), None, [], None
+    # The Site and Hole menus are filled in the browser from the reference
+    # table (held in "pe-ref-store"), so they update immediately even while
+    # the server is busy with a long archive request.
+    app.clientside_callback(
+        """
+        function(expedition, ref) {
+            const entries = (ref && expedition && ref[expedition]) || [];
+            const sites = entries.map(e => ({label: e[0], value: e[0]}));
+            return [sites, null, [], null];
+        }
+        """,
+        Output(f"pe-{ds}-site", "options"), Output(f"pe-{ds}-site", "value"),
+        Output(f"pe-{ds}-hole", "options", allow_duplicate=True),
+        Output(f"pe-{ds}-hole", "value", allow_duplicate=True),
+        Input(f"pe-{ds}-exp", "value"), State("pe-ref-store", "data"), prevent_initial_call=True)
 
-    @app.callback(Output(f"pe-{ds}-hole", "options", allow_duplicate=True),
-                  Output(f"pe-{ds}-hole", "value", allow_duplicate=True),
-                  Input(f"pe-{ds}-site", "value"), State(f"pe-{ds}-exp", "value"),
-                  prevent_initial_call=True)
-    def hole_options(site, expedition):
-        """List the Holes of the selected Site."""
-        holes = holes_for_site(expedition, site)
-        return [{"label": hole_display_label(h), "value": h} for h in holes], None
+    app.clientside_callback(
+        """
+        function(site, expedition, ref) {
+            const entries = (ref && expedition && ref[expedition]) || [];
+            const entry = entries.find(e => e[0] === site);
+            const holes = entry ? entry[1].map(h => ({label: h[1], value: h[0]})) : [];
+            return [holes, null];
+        }
+        """,
+        Output(f"pe-{ds}-hole", "options", allow_duplicate=True),
+        Output(f"pe-{ds}-hole", "value", allow_duplicate=True),
+        Input(f"pe-{ds}-site", "value"), State(f"pe-{ds}-exp", "value"), State("pe-ref-store", "data"),
+        prevent_initial_call=True)
 
     @app.callback(Output(f"pe-store-{ds}", "data", allow_duplicate=True),
                   Output(f"pe-prov-{ds}", "data", allow_duplicate=True),
                   Output(f"pe-{ds}-db-status", "children"),
                   Output(f"pe-{ds}-db-results", "children"),
+                  Output("pe-merged-store", "data", allow_duplicate=True),
+                  Output("pe-status-merged", "children", allow_duplicate=True),
                   Input(f"pe-{ds}-fetch", "n_clicks"),
                   State(f"pe-{ds}-report", "value"), State(f"pe-{ds}-exp", "value"),
                   State(f"pe-{ds}-site", "value"), State(f"pe-{ds}-hole", "value"),
                   prevent_initial_call=True)
     def fetch_from_archive(n_clicks, report, expedition, site, hole):
         """Retrieve the requested report from the archive chosen by the routing rules."""
+        unchanged = (no_update, no_update)
         if not expedition:
-            return no_update, no_update, _message("Select a Leg or Expedition.", "warn"), ""
+            return no_update, no_update, _message("Select a Leg or Expedition.", "warn"), "", *unchanged
         if not report:
-            return no_update, no_update, _message("Select a report type.", "warn"), ""
+            return no_update, no_update, _message("Select a report type.", "warn"), "", *unchanged
+        if report in SITE_REQUIRED_REPORTS and not site:
+            return (no_update, no_update,
+                    _message("This data type is too large to retrieve for a whole Leg or Expedition. "
+                             "Select a Site (and preferably a Hole).", "warn"), "", *unchanged)
         outcome = routing.fetch(report, str(expedition), site or "", hole or "")
         if outcome.df is not None:
+            # The archives report no row count before download, so the limit can only be
+            # applied once the table has been retrieved.
+            if len(outcome.df) > MAX_FETCH_ROWS:
+                return (no_update, no_update,
+                        _message(f"The request returned {len(outcome.df):,} rows, more than the "
+                                 f"{MAX_FETCH_ROWS:,} this application can display. Select a Site "
+                                 "or Hole to narrow it.", "error"), "", *unchanged)
             record = provenance.new_record(outcome.source, outcome.df, label=outcome.message)
-            return to_store(outcome.df), record, _message(outcome.message, "ok"), ""
+            return (to_store(outcome.df), record, _message(outcome.message, "ok"), "",
+                    *_merge_cleared(ds))
         if outcome.candidates:
-            return no_update, no_update, _message(outcome.message), _pangaea_choices(ds, outcome.candidates)
-        return no_update, no_update, _message(outcome.message, "error"), ""
+            return (no_update, no_update, _message(outcome.message),
+                    _pangaea_choices(ds, outcome.candidates), *unchanged)
+        return no_update, no_update, _message(outcome.message, "error"), "", *unchanged
 
     @app.callback(Output(f"pe-store-{ds}", "data", allow_duplicate=True),
                   Output(f"pe-prov-{ds}", "data", allow_duplicate=True),
                   Output(f"pe-{ds}-db-status", "children", allow_duplicate=True),
+                  Output("pe-merged-store", "data", allow_duplicate=True),
+                  Output("pe-status-merged", "children", allow_duplicate=True),
                   Input({"type": "pe-pick", "ds": ds, "pid": ALL}, "n_clicks"),
                   prevent_initial_call=True)
     def pick_pangaea(clicks):
         """Download the PANGAEA dataset the user selected from the candidates."""
         trigger = ctx.triggered_id
         if not trigger or not any(clicks or []):
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
         try:
             df, source = pangaea.fetch_dataset(trigger["pid"])
         except SourceError as exc:
-            return no_update, no_update, _message(str(exc), "error")
+            return no_update, no_update, _message(str(exc), "error"), no_update, no_update
         message = f"PANGAEA dataset {trigger['pid']} ({len(df):,} rows)"
-        return to_store(df), provenance.new_record(source, df, label=message), _message(message, "ok")
+        return (to_store(df), provenance.new_record(source, df, label=message), _message(message, "ok"),
+                *_merge_cleared(ds))
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +632,7 @@ def _register_legacy(app):
                 card(data_b, prov_b, "Dataset B", "var(--accent3)"))
 
     @app.callback(Output("pe-merged-store", "data"), Output("pe-prov-merged", "data"),
-                  Output("pe-status-merged", "children"),
+                  Output("pe-status-merged", "children"), Output("pe-merge-busy", "children"),
                   Input("pe-merge-btn", "n_clicks"),
                   State("pe-store-a", "data"), State("pe-store-b", "data"),
                   State("pe-prov-a", "data"), State("pe-prov-b", "data"),
@@ -538,23 +643,24 @@ def _register_legacy(app):
         """Merge datasets A and B by depth and store the result with its merge report and provenance."""
         dfa, dfb = from_store(data_a), from_store(data_b)
         if dfa is None or dfb is None:
-            return no_update, no_update, "Load both datasets before merging."
-        depth_a = depth_a or find_depth_column(dfa)
-        depth_b = depth_b or find_depth_column(dfb)
+            return no_update, no_update, "Load both datasets before merging.", ""
+        depth_a = depth_a if depth_a in dfa.columns else find_depth_column(dfa)
+        depth_b = depth_b if depth_b in dfb.columns else find_depth_column(dfb)
         if not depth_a or not depth_b:
-            return no_update, no_update, "Select a depth column for each dataset."
+            return no_update, no_update, "Select a depth column for each dataset.", ""
         options = options or []
         try:
             merged, report = merge_by_depth(
                 dfa, dfb, depth_a, depth_b,
                 tolerance_m=float(tolerance_cm if tolerance_cm is not None else 2) / 100.0,
                 allow_mixed_scales="mixed_scales" in options, one_to_one="one_to_one" in options,
-                across_holes="across_holes" in options)
+                across_holes="across_holes" in options,
+                assumed_scale_a=_source_scale(prov_a), assumed_scale_b=_source_scale(prov_b))
         except MergeError as exc:
-            return None, None, html.Span(f"Merge not performed: {exc}", style={"color": "var(--danger)"})
+            return None, None, html.Span(f"Merge not performed: {exc}", style={"color": "var(--danger)"}), ""
         report_dict = report.to_dict()
         return (to_store(merged), provenance.merge_record(prov_a, prov_b, report_dict, merged),
-                _merge_status(report_dict))
+                _merge_status(report_dict), "")
 
     @app.callback(Output("pe-exp-filter", "options"), Output("pe-exp-filter", "value"),
                   Output("pe-exp-hint", "children"),
@@ -579,8 +685,8 @@ def _register_legacy(app):
     @app.callback(Output("pe-merge-section", "style"),
                   Output("pe-status-b", "style"), Output("pe-status-merged", "style"),
                   Output("pe-depth-a-container", "style"), Output("pe-depth-b-container", "style"),
-                  Output("pe-ycols-b-container", "style"),
-                  Output("pe-yaxis-lbl", "children"), Output("pe-a-label", "children"),
+                  Output("pe-ycols-b-container", "style"), Output("pe-rows-container", "style"),
+                  Output("pe-a-label", "children"),
                   Input("pe-view-mode", "value"))
     def view_mode_controls(mode):
         """Show dataset B, the merge settings, and the merge-depth pickers only in merge view.
@@ -595,34 +701,73 @@ def _register_legacy(app):
         picker = {"flex": "1 1 180px", "minWidth": "160px"}
         if mode == "merged":
             return ({}, {**status, "marginRight": "8px"}, status, picker, picker,
-                    {"flex": "2 1 240px", "minWidth": "160px"}, "DATASET A COLUMNS", "DATASET A")
-        return hidden, hidden, hidden, hidden, hidden, hidden, "COLUMNS", "DATASET"
+                    {"flex": "2 1 240px", "minWidth": "160px"}, {"marginTop": "8px"}, "DATASET A")
+        return hidden, hidden, hidden, hidden, hidden, hidden, hidden, "DATASET"
+
+    @app.callback(Output("pe-xaxis-lbl", "children"), Output("pe-yaxis-lbl", "children"),
+                  Output("pe-ycols-b-lbl", "children"),
+                  Input("pe-view-mode", "value"), Input("pe-chart-mode", "value"))
+    def axis_labels(mode, chart_mode):
+        """Name the column pickers for what the selected chart does with them."""
+        merged = mode == "merged"
+        if chart_mode == "scatter":
+            if merged:
+                return "DEPTH (COLORS THE POINTS)", "X AXIS: DATASET A COLUMN", "Y AXIS: DATASET B COLUMN"
+            return "DEPTH (COLORS THE POINTS)", "X AXIS, THEN Y AXIS (TWO COLUMNS)", ""
+        if chart_mode == "dual":
+            if merged:
+                return "DEPTH AXIS", "LEFT AXIS: DATASET A COLUMN", "RIGHT AXIS: DATASET B COLUMN"
+            return "DEPTH AXIS", "LEFT AXIS, THEN RIGHT AXIS (TWO COLUMNS)", ""
+        return ("DEPTH AXIS", "DATASET A COLUMNS" if merged else "COLUMNS",
+                "DATASET B COLUMNS")
 
     @app.callback(Output("pe-xaxis", "options"), Output("pe-xaxis", "value"),
                   Output("pe-yaxis", "options"), Output("pe-yaxis", "value"),
                   Output("pe-ycols-b", "options"), Output("pe-ycols-b", "value"),
                   Input("pe-view-mode", "value"), Input("pe-merged-store", "data"),
-                  Input("pe-store-a", "data"), Input("pe-store-b", "data"))
-    def axis_options(mode, merged, data_a, data_b):
+                  Input("pe-store-a", "data"), Input("pe-store-b", "data"),
+                  State("pe-chart-mode", "value"))
+    def axis_options(mode, merged, data_a, data_b, chart_mode):
         """Offer depth columns for the depth axis and measurement columns for the tracks.
 
         Only numeric measurement columns are offered: plotting a text field
         would assign arbitrary positions to its categories, and plotting an
         identifier (Core, Section, offset) would suggest a physical trend
-        where there is none.
+        where there is none. In merged view the merge depth is the default
+        depth axis, and the columns of each dataset are taken from that
+        dataset itself, so that a column of B is offered even when few of its
+        samples were paired.
         """
         df = from_store(_active(mode, merged, data_a, data_b))
         if df is None:
             return [], None, [], None, [], None
+        two = chart_mode in ("scatter", "dual")
+        if mode == "merged":
+            depths = depth_columns(df)
+            depth = merge_depth_column(df) or find_depth_column(df)
+            if depth is not None and depth not in depths:
+                depths = [depth] + depths
+            cols_a = _merged_columns(df, from_store(data_a), "_A")
+            cols_b = _merged_columns(df, from_store(data_b), "_B")
+            return (_options(depths), depth, _options(cols_a), cols_a[:1 if two else 3],
+                    _options(cols_b), cols_b[:1 if two else 3])
         depths = depth_columns(df)
         measures = measurement_columns(df)
-        depth = find_depth_column(df)
+        return _options(depths), find_depth_column(df), _options(measures), measures[:2 if two else 3], [], []
+
+    @app.callback(Output("pe-yaxis", "value", allow_duplicate=True),
+                  Output("pe-ycols-b", "value", allow_duplicate=True),
+                  Input("pe-chart-mode", "value"),
+                  State("pe-view-mode", "value"), State("pe-yaxis", "value"), State("pe-ycols-b", "value"),
+                  prevent_initial_call=True)
+    def trim_columns_for_pair_charts(chart_mode, mode, cols_a, cols_b):
+        """Keep only the columns a two-column chart uses, so the pickers show what is plotted."""
+        if chart_mode not in ("scatter", "dual"):
+            return no_update, no_update
+        cols_a, cols_b = list(cols_a or []), list(cols_b or [])
         if mode == "merged":
-            cols_a = [c for c in measures if str(c).endswith("_A")]
-            cols_b = [c for c in measures if str(c).endswith("_B")]
-            return (_options(depths), depth, _options(cols_a), cols_a[:3],
-                    _options(cols_b), cols_b[:3])
-        return _options(depths), depth, _options(measures), measures[:3], [], []
+            return cols_a[:1], cols_b[:1]
+        return cols_a[:2], no_update
 
     @app.callback(Output("pe-rolling-ctrl", "style"), Output("pe-detrend-ctrl", "style"),
                   Input("pe-chart-mode", "value"))
@@ -637,17 +782,19 @@ def _register_legacy(app):
                   Input("pe-exp-filter", "value"), Input("pe-exp-filter", "options"),
                   Input("pe-xaxis", "value"), Input("pe-yaxis", "value"), Input("pe-ycols-b", "value"),
                   Input("pe-chart-mode", "value"), Input("pe-rolling-window", "value"),
-                  Input("pe-detrend", "value"), Input("theme-store", "data"))
+                  Input("pe-detrend", "value"), Input("pe-rows", "value"), Input("theme-store", "data"))
     def update_chart(mode, merged, data_a, data_b, selected, exp_options, depth, cols_a, cols_b,
-                     chart_mode, window, detrend, theme):
+                     chart_mode, window, detrend, rows, theme):
         """Draw the Legacy Data chart for the displayed table, selected columns, and chart mode."""
-        df = from_store(_active(mode, merged, data_a, data_b))
+        df = _displayed(mode, merged, data_a, data_b, selected, exp_options, rows)
         if df is None:
-            hint = "Merge A and B to view the merged data" if mode == "merged" else "Load a dataset"
+            hint = "Click Merge datasets to view the merged data" if mode == "merged" else "Load a dataset"
             return empty_figure(hint, theme)
+        if mode == "merged" and rows == "paired" and df.empty:
+            return empty_figure("No paired samples to show; increase the tolerance or show all A samples",
+                                theme)
         if not depth or depth not in df.columns:
             return empty_figure("Select a depth column", theme)
-        df = filter_expeditions(df, selected if exp_options else None)
         df = df.dropna(subset=[depth])
         cols_a = [c for c in (cols_a or []) if c in df.columns]
         cols_b = [c for c in (cols_b or []) if c in df.columns] if mode == "merged" else []
@@ -665,10 +812,7 @@ def _register_legacy(app):
                                           detrend="detrend" in (detrend or []))
             return dual_axis_figure(df, depth, first, second, theme)
         if chart_mode == "rolling":
-            try:
-                window_m = float(window)
-            except (TypeError, ValueError):
-                window_m = 0
+            window_m = _positive(window, default=0.0)
             if window_m <= 0:
                 return empty_figure("Enter a positive window length", theme)
             return smoothed_figure(df, depth, cols_a, cols_b, window_m, theme=theme)
@@ -677,13 +821,14 @@ def _register_legacy(app):
     @app.callback(Output("pe-table-container", "children"),
                   Input("pe-view-mode", "value"), Input("pe-merged-store", "data"),
                   Input("pe-store-a", "data"), Input("pe-store-b", "data"),
-                  Input("pe-exp-filter", "value"), Input("pe-exp-filter", "options"))
-    def update_table(mode, merged, data_a, data_b, selected, exp_options):
-        """Show the first rows of the displayed table after the Expedition filter."""
-        df = from_store(_active(mode, merged, data_a, data_b))
+                  Input("pe-exp-filter", "value"), Input("pe-exp-filter", "options"),
+                  Input("pe-rows", "value"))
+    def update_table(mode, merged, data_a, data_b, selected, exp_options, rows):
+        """Show the displayed table after the Expedition filter and the paired-rows choice."""
+        df = _displayed(mode, merged, data_a, data_b, selected, exp_options, rows)
         if df is None:
             return ""
-        return data_table(filter_expeditions(df, selected if exp_options else None))
+        return data_table(df)
 
     @app.callback(Output("pe-download", "data"),
                   Input("pe-download-btn", "n_clicks"),
@@ -691,8 +836,10 @@ def _register_legacy(app):
                   State("pe-store-a", "data"), State("pe-store-b", "data"),
                   State("pe-prov-merged", "data"), State("pe-prov-a", "data"), State("pe-prov-b", "data"),
                   State("pe-exp-filter", "value"), State("pe-exp-filter", "options"),
+                  State("pe-rows", "value"),
                   prevent_initial_call=True)
-    def download(n_clicks, mode, merged, data_a, data_b, prov_merged, prov_a, prov_b, selected, exp_options):
+    def download(n_clicks, mode, merged, data_a, data_b, prov_merged, prov_a, prov_b, selected,
+                 exp_options, rows):
         """Export the displayed table, after the Expedition filter, with its provenance and citations."""
         df = from_store(_active(mode, merged, data_a, data_b))
         if df is None:
@@ -701,6 +848,48 @@ def _register_legacy(app):
         if exp_options:
             df = filter_expeditions(df, selected)
             record = provenance.add_step(record, "filter_expeditions", selected=selected)
+        if mode == "merged" and rows == "paired":
+            df = paired_rows(df)
+            record = provenance.add_step(record, "keep_paired_rows_only",
+                                         note="rows of A without a paired B sample were omitted")
         name = {"a": "dataset_a", "b": "dataset_b"}.get(mode, "merged_a_b")
         return dcc.send_bytes(provenance.export_archive(df, record, basename=f"sod_{name}"),
                               f"sod_{name}.zip")
+
+
+def _displayed(mode: str, merged: str | None, data_a: str | None, data_b: str | None,
+               selected: list[str] | None, exp_options: list[dict] | None,
+               rows: str | None) -> pd.DataFrame | None:
+    """The table shown in the chart and data table.
+
+    This is the table of the current view, filtered by the Expedition
+    checkboxes and, in merged view with "Paired samples only", restricted to
+    the rows in which a B sample was paired.
+    """
+    df = from_store(_active(mode, merged, data_a, data_b))
+    if df is None:
+        return None
+    df = filter_expeditions(df, selected if exp_options else None)
+    if mode == "merged" and rows == "paired":
+        df = paired_rows(df)
+    return df
+
+
+def _merged_columns(merged: pd.DataFrame, source: pd.DataFrame | None, suffix: str) -> list[str]:
+    """Measurement columns of one dataset as they are named in the merged table."""
+    if source is not None:
+        names = [f"{c}{suffix}" for c in measurement_columns(source)]
+        found = [c for c in names if c in merged.columns]
+        if found:
+            return found
+    return [c for c in measurement_columns(merged) if str(c).endswith(suffix)]
+
+
+def _source_scale(record: dict | None) -> str | None:
+    """Depth scale defined by a dataset's source when its headers name none.
+
+    DSDP depths are meters below seafloor ("mbsf"); DSDP predates composite
+    depth scales. Other sources state the scale in their headers.
+    """
+    source_type = ((record or {}).get("source") or {}).get("type", "")
+    return "mbsf" if str(source_type).startswith("dsdp") else None

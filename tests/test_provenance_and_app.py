@@ -86,3 +86,45 @@ def test_app_builds_with_unique_component_ids():
     walk(app.layout)
     assert len(ids) == len(set(ids))
     assert len(app.callback_map) > 30
+
+
+def test_store_holds_only_a_key_and_returns_independent_copies():
+    df = pd.DataFrame({"x": [1, 2]})
+    key = to_store(df)
+    assert isinstance(key, str) and len(key) == 32
+    first = from_store(key)
+    first.loc[0, "x"] = 99
+    assert from_store(key).loc[0, "x"] == 1
+    assert from_store("0" * 32) is None
+    assert to_store(None) is None and from_store(None) is None
+
+
+def test_store_evicts_least_recently_used_tables(monkeypatch):
+    from sod_explorer import callbacks
+    monkeypatch.setattr(callbacks, "CACHE_MAX_TABLES", 2)
+    first = to_store(pd.DataFrame({"x": [1]}))
+    second = to_store(pd.DataFrame({"x": [2]}))
+    from_store(first)                      # first is now the most recently used
+    to_store(pd.DataFrame({"x": [3]}))
+    assert from_store(first) is not None
+    assert from_store(second) is None
+
+
+def test_row_count_text():
+    from sod_explorer.callbacks import TABLE_PREVIEW_ROWS, _row_count_text
+    assert _row_count_text(1) == "1 row"
+    assert _row_count_text(7) == "7 rows"
+    assert "download contains all rows" in _row_count_text(TABLE_PREVIEW_ROWS + 1)
+
+
+def test_site_and_hole_menus_data_match_reference_lookups():
+    from sod_explorer.reference import holes_for_site, reference_menu_data, sites_for_expedition
+    data = reference_menu_data()
+    assert [s for s, _ in data["341"]] == sites_for_expedition("341")
+    assert [h for h, _ in dict(data["178"])["1095"]] == holes_for_site("178", "1095")
+
+
+def test_app_layout_and_callbacks_build():
+    from sod_explorer.app import create_app
+    app = create_app()
+    assert "pe-ref-store" in str(app.layout)

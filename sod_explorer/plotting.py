@@ -279,6 +279,13 @@ def depth_log_figure(df, depth, curves, lithology=None, lithology_scale=None,
 # Legacy Data view
 # ---------------------------------------------------------------------------
 
+# Line and marker sizes chosen for legibility on a projector and for readers
+# with reduced vision.
+LINE_WIDTH = 2.5
+TRACK_MARKER_SIZE = 5
+POINT_SIZE = 10
+
+
 def _track_colors(theme, columns_a, columns_b):
     """Pair each selected column with a color: blue-violet hues for dataset A,
     warm hues for dataset B."""
@@ -297,8 +304,9 @@ def tracks_figure(df, depth, columns_a, columns_b, theme="dark") -> go.Figure:
     for i, (column, color) in enumerate(items):
         for hole, part in _segments(df, labels):
             part = part[[depth, column]].dropna().sort_values(depth)
-            fig.add_trace(go.Scatter(x=part[column], y=part[depth], mode="lines", name=column,
-                                     line=dict(color=color, width=1.4),
+            fig.add_trace(go.Scatter(x=part[column], y=part[depth], mode="lines+markers", name=column,
+                                     line=dict(color=color, width=LINE_WIDTH),
+                                     marker=dict(color=color, size=TRACK_MARKER_SIZE),
                                      hovertemplate=(f"{hole} " if hole else "")
                                      + "%{x:.4g} at %{y:.2f}<extra>" + column + "</extra>"),
                           row=1, col=i + 1)
@@ -334,7 +342,8 @@ def correlation_figure(df, depth, column_x, column_y, theme="dark", detrend=Fals
             return empty_figure("Too few samples per hole to remove a depth trend", theme)
     fig = go.Figure(go.Scatter(
         x=sub[column_x], y=sub[column_y], mode="markers", name="samples",
-        marker=dict(color=sub[depth], colorscale="Viridis_r", size=5, opacity=0.75, showscale=True,
+        marker=dict(color=sub[depth], colorscale="Viridis_r", size=POINT_SIZE, opacity=0.8, showscale=True,
+                    line=dict(width=0.5, color=t["border"]),
                     colorbar=dict(title=dict(text=depth, font=dict(color=t["muted"], size=10)),
                                   tickfont=dict(color=t["muted"]))),
         hovertemplate=(f"{x_label}: %{{x:.4g}}<br>{y_label}: %{{y:.4g}}"
@@ -350,7 +359,7 @@ def correlation_figure(df, depth, column_x, column_y, theme="dark", detrend=Fals
     else:
         x_range = np.linspace(sub[column_x].min(), sub[column_x].max(), 200)
         fig.add_trace(go.Scatter(x=x_range, y=result.slope * x_range + result.intercept, mode="lines",
-                                 name="OLS fit", line=dict(color=t["danger"], width=1.5, dash="dash")))
+                                 name="OLS fit", line=dict(color=t["danger"], width=2.5, dash="dash")))
         # The statistics are set on two lines so that they fit the width of a phone screen.
         summary = result.summary().replace(", p = ", "<br>p = ").replace(" (significance", "<br>(significance")
         fig.update_layout(title=dict(text=summary
@@ -367,13 +376,13 @@ def dual_axis_figure(df, depth, column_a, column_b, theme="dark") -> go.Figure:
     t = palette(theme)
     labels = hole_labels(df)
     fig = go.Figure()
-    for column, color, axis, dash in ((column_a, t["accent"], "y", "solid"),
-                                      (column_b, t["accent3"], "y2", "dot")):
+    # Both lines are solid and told apart by color; dashed lines are reserved for fitted lines.
+    for column, color, axis in ((column_a, t["accent"], "y"), (column_b, t["accent3"], "y2")):
         for j, (_hole, part) in enumerate(_segments(df, labels)):
             part = part[[depth, column]].dropna().sort_values(depth)
             fig.add_trace(go.Scatter(x=part[depth], y=part[column], mode="lines", name=column,
                                      legendgroup=column, showlegend=(j == 0), yaxis=axis,
-                                     line=dict(color=color, width=1.4, dash=dash)))
+                                     line=dict(color=color, width=LINE_WIDTH)))
     fig.update_layout(**base_layout(theme), height=600,
                       xaxis=dict(title=depth), yaxis=dict(title=column_a, color=t["accent"]),
                       yaxis2=dict(title=column_b, color=t["accent3"], overlaying="y", side="right",
@@ -394,20 +403,41 @@ def smoothed_figure(df, depth, columns_a, columns_b, window_m, min_count=3, them
     items = _track_colors(theme, columns_a, columns_b)
     labels = hole_labels(df)
     fig = make_subplots(rows=1, cols=len(items), shared_yaxes=True, horizontal_spacing=0.03)
+    any_smoothed = False
     for i, (column, color) in enumerate(items):
         for j, (_hole, part) in enumerate(_segments(df, labels)):
             part = part[[depth, column]].dropna().sort_values(depth)
             smooth = depth_window_mean(part[depth], part[column], window_m, min_count=min_count)
+            any_smoothed = any_smoothed or bool(np.isfinite(np.asarray(smooth, dtype=float)).any())
             fig.add_trace(go.Scatter(x=part[column], y=part[depth], mode="lines", showlegend=False,
-                                     line=dict(color=color, width=0.6), opacity=0.35,
+                                     line=dict(color=color, width=1.5), opacity=0.45,
                                      hoverinfo="skip"), row=1, col=i + 1)
             fig.add_trace(go.Scatter(x=smooth, y=part[depth], mode="lines",
                                      name=f"{column} ({window_m:g} m mean)", legendgroup=column,
-                                     showlegend=(j == 0), line=dict(color=color, width=2.2)),
+                                     showlegend=(j == 0), line=dict(color=color, width=4)),
                           row=1, col=i + 1)
         fig.update_xaxes(title_text=column, title_font=dict(size=10), row=1, col=i + 1)
     fig.update_yaxes(title_text=depth, autorange="reversed", row=1, col=1)
+    if not any_smoothed:
+        spacing = _median_spacing(df, depth)
+        advice = (f" The median sample spacing is {spacing:.2g} m; try a window of at least "
+                  f"{max(1, round(3 * spacing)):g} m." if spacing else "")
+        fig.update_layout(title=dict(text=f"No {window_m:g} m window holds {min_count} or more samples, "
+                                          f"so no mean was drawn.{advice}",
+                                     font=dict(size=11, color=t["warn"])))
     fig.update_layout(**base_layout(theme), height=600, showlegend=True,
                       legend=dict(bgcolor=t["panel"], bordercolor=t["border"], borderwidth=1,
                                   font=dict(size=10)))
     return _style_axes(fig, theme)
+
+
+def _median_spacing(df: pd.DataFrame, depth: str) -> float | None:
+    """Median depth interval between consecutive samples, per hole, in the units of ``depth``."""
+    labels = hole_labels(df)
+    gaps = []
+    for _hole, part in _segments(df, labels):
+        values = np.sort(pd.to_numeric(part[depth], errors="coerce").dropna().to_numpy())
+        if len(values) > 1:
+            diffs = np.diff(values)
+            gaps.extend(diffs[diffs > 0])
+    return float(np.median(gaps)) if gaps else None

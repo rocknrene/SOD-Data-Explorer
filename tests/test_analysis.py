@@ -264,3 +264,45 @@ def test_merge_across_holes_pairs_on_depth_alone():
     merged, report = analysis.merge_by_depth(a, b, "Depth (mbsf)", "Depth CSF-A (m)", 0.5, across_holes=True)
     assert report.matched == 2 and report.grouping == "none"
     assert any("not from the same location" in w for w in report.warnings)
+
+
+def test_expedition_filter_removes_rows_holding_an_unselected_expedition():
+    # A merged table of IODP 327 (A) with ODP 178 (B): unselecting either Expedition must change the view.
+    df = pd.DataFrame({"Exp_A": [327, 327, 327], "Exp_B": [178, None, 178], "x": [1, 2, 3]})
+    assert analysis.filter_expeditions(df, ["327"])["x"].tolist() == [2]
+    assert analysis.filter_expeditions(df, ["178"]).empty
+    assert analysis.filter_expeditions(df, ["327", "178"])["x"].tolist() == [1, 2, 3]
+
+
+class TestMergeLabelsAndWarnings:
+    def test_source_defined_scale_names_the_merge_depth(self):
+        a = pd.DataFrame({"Depth (m)": [1.0, 2.0], "x": [1, 2]})
+        b = pd.DataFrame({"Depth (m)": [1.0, 2.0], "y": [3, 4]})
+        merged, report = analysis.merge_by_depth(a, b, "Depth (m)", "Depth (m)", tolerance_m=0.02,
+                                                 assumed_scale_a="mbsf", assumed_scale_b="mbsf")
+        assert merged.columns[0] == "merge depth mbsf (m)"
+        assert not any("could not be determined" in w for w in report.warnings)
+
+    def test_unknown_scale_is_not_written_into_the_column_name(self):
+        a = pd.DataFrame({"Depth (m)": [1.0], "x": [1]})
+        merged, _ = analysis.merge_by_depth(a, a.rename(columns={"x": "y"}), "Depth (m)", "Depth (m)",
+                                            tolerance_m=0.02)
+        assert merged.columns[0] == "merge depth (m)"
+
+    def test_warning_when_nothing_pairs(self):
+        a = pd.DataFrame({DEPTH: [1.0, 2.0], "x": [1, 2]})
+        b = pd.DataFrame({DEPTH: [1.5], "y": [3]})
+        _, report = analysis.merge_by_depth(a, b, DEPTH, DEPTH, tolerance_m=0.02)
+        assert report.matched == 0
+        assert any("Increase the tolerance" in w for w in report.warnings)
+
+
+def test_merged_table_helpers(two_hole_tables):
+    a, b = two_hole_tables
+    merged, report = analysis.merge_by_depth(a, b, DEPTH, DEPTH, tolerance_m=0.02)
+    assert analysis.merge_depth_column(merged) == report.merge_depth_column
+    paired = analysis.paired_rows(merged)
+    assert len(paired) == report.matched
+    assert paired[analysis.OFFSET_COLUMN].notna().all()
+    assert analysis.paired_rows(a) is a                      # not a merged table: unchanged
+    assert analysis.merge_depth_column(a) is None
