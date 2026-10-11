@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FFROM python:3.11-slim
 
 WORKDIR /app
 
@@ -18,4 +18,7 @@ COPY . .
 
 EXPOSE 7860
 
-CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "1", "--timeout", "180", "app:server"]
+# One process (loaded tables are cached in its memory; see callbacks.py) with
+# several threads, so that a long archive request does not block other users
+# or other requests from the same page.
+CMD ["gunicorn", "--bind", "0.0.0.0:7860", "--workers", "1", "--threads", "8", "--timeout", "600", "app:server"]
