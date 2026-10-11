@@ -139,7 +139,8 @@ STATUS_BOX = {"flex": "1", "background": "var(--panel)", "border": "1px solid va
               "color": "var(--muted)", "minWidth": "200px"}
 
 
-def busy_message(text: str = "Working on it. Large requests can take a minute or two.") -> html.Div:
+def busy_message(text: str = "Working on it. Retrieving a whole Leg or Expedition can take several "
+                              "minutes.") -> html.Div:
     """Message shown over a chart or table while the server is preparing it."""
     return html.Div([html.Div([html.Span(), html.Span(), html.Span()], className="sod-busy-dots",
                               style={"marginBottom": "8px"}),

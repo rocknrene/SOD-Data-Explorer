@@ -86,6 +86,8 @@ _OTHER_IDENTIFIER_PATTERNS = [
         # Positions of a sample within its section (DSDP and ODP "Top (cm)", "Bottom (cm)").
         r"^(top|bottom|bot)( ?(interval|offset))?$",
         r"^interval ?(top|bottom|bot)$",
+        # Replicate counter of repeated tests on one sample (added by sources.lore).
+        r"^replicate( ?(no\.?|number|id))?$",
     )
 ]
 

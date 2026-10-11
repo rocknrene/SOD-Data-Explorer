@@ -79,16 +79,32 @@ def file_url(code: str, leg: str, site: str, hole: str) -> str:
 def parse_data_file(text: str) -> pd.DataFrame:
     """Parse a tab-delimited data file of the archive.
 
-    Column names are stripped of surrounding blanks, and the empty column
-    produced by the trailing tab of each line is removed.
+    Column names are stripped of surrounding blanks, and empty columns
+    produced by trailing tabs are removed.
+
+    Some files have more fields on their data lines than in their header
+    line (the interstitial water file of Leg 204, Hole 1244C has two extra
+    empty fields per line). Left alone, pandas would take the surplus
+    leading fields as the row index and shift every column, so that Site
+    and Hole would hold the core number and core type. The header is
+    therefore padded with placeholder names for the extra fields, which are
+    removed if they are empty and kept (as "Unnamed" columns) otherwise, so
+    that no data are lost.
 
     Raises
     ------
     SourceError
         If the text is not a data file (for example, an HTML error page).
     """
+    lines = text.splitlines()
+    if not lines:
+        raise SourceError("The NCEI file is empty")
+    header = _unique_names(name.strip() for name in lines[0].split("\t"))
+    width = max(len(line.split("\t")) for line in lines)
+    names = header + [f"Unnamed: {i}" for i in range(len(header), width)]
     try:
-        df = pd.read_csv(io.StringIO(text), sep="\t", dtype={"Site": str, "Hole": str})
+        df = pd.read_csv(io.StringIO("\n".join(lines[1:])), sep="\t", header=None, names=names,
+                         index_col=False, dtype={"Site": str, "Hole": str})
     except (pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
         raise SourceError(f"The NCEI file could not be parsed: {exc}") from exc
     df.columns = [str(c).strip() for c in df.columns]
@@ -96,6 +112,22 @@ def parse_data_file(text: str) -> pd.DataFrame:
     if any(c not in df.columns for c in _REQUIRED_COLUMNS):
         raise SourceError("The NCEI response is not a data file (no Leg, Site, and Hole columns)")
     return df
+
+
+def _unique_names(names) -> list[str]:
+    """Make repeated header names unique as pandas does ("Method", "Method.1", ...).
+
+    Data files repeat a "Method" column after every measured quantity.
+    Blank names become "Unnamed: <position>".
+    """
+    seen: dict[str, int] = {}
+    unique = []
+    for position, name in enumerate(names):
+        name = name or f"Unnamed: {position}"
+        count = seen.get(name, 0)
+        unique.append(name if count == 0 else f"{name}.{count}")
+        seen[name] = count + 1
+    return unique
 
 
 @lru_cache(maxsize=CACHE_SIZE)

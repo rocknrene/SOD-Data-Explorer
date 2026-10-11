@@ -354,6 +354,22 @@ class TestNcei:
         depth = find_depth_column(df)
         assert depth == "Depth (mbsf)" and depth_scale(depth) == "mbsf"
 
+    def test_data_lines_longer_than_header_do_not_shift_columns(self, fixture_bytes):
+        # The interstitial water file of 204-1244C has two more (empty) fields on each data
+        # line than in its header; pandas would otherwise shift every column by two.
+        from sod_explorer.sources import ncei
+        from sod_explorer.sources.common import restrict_to_request
+        df = ncei.parse_data_file(fixture_bytes("ncei_iw_204_1244c.txt").decode())
+        assert df[["Leg", "Site", "Hole", "Core"]].iloc[0].tolist() == [204, "1244", "C", 1]
+        assert df.loc[0, "Depth (mbsf)"] == 0.65 and df.loc[0, "Sulfate (SO4) [mM]"] == 29.7
+        assert "Method.1" in df.columns and not any(c.startswith("Unnamed") for c in df.columns)
+        assert len(restrict_to_request(df, "204", "1244", "C")) == 5
+
+    def test_surplus_fields_holding_values_are_kept(self):
+        from sod_explorer.sources import ncei
+        df = ncei.parse_data_file("Leg\tSite\tHole\tx\n204\t1244\tC\t1\t9\n")
+        assert df.loc[0, "Site"] == "1244" and df.loc[0, "x"] == 1 and df.loc[0, "Unnamed: 4"] == 9
+
     def test_html_is_not_a_data_file(self):
         from sod_explorer.sources import ncei
         with pytest.raises(SourceError):

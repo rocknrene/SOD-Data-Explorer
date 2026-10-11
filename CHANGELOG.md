@@ -27,6 +27,12 @@ Restructured from a single-file application into a tested package.
 - RGB requires a Site; requests over 300,000 rows are refused with advice.
 - Shipboard tab carries an under-development notice; Dataset help lists DSDP,
   ODP, IODP in order.
+- "Replicate" (the counter of repeated tests on one sample) is no longer
+  offered as a data column; the busy message says that whole-Leg requests
+  can take several minutes (Expedition 362 took 201 s in the acceptance run).
+- NCEI files whose data lines have more fields than their header (Leg 204
+  interstitial water) were read with every column shifted, so no row matched
+  the requested Hole; the header is now padded and no row is lost.
 
 ### Report types (data-type table by L. Childress)
 - Report menu rebuilt from the cross-program "SOD Data Types" table: sixteen
