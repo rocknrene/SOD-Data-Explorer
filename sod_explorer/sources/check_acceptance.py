@@ -157,7 +157,12 @@ def _column_types(table: pd.DataFrame) -> str:
     for column in table.columns:
         role = ("measurement" if column in measures else "depth" if column in depths
                 else f"identifier:{identifier_kind(column)}" if identifier_kind(column) else "other")
-        parts.append(f"{column!r} [{table[column].dtype}, {role}, {int(table[column].notna().sum())} values]")
+        entry = f"{column!r} [{table[column].dtype}, {role}, {int(table[column].notna().sum())} values"
+        if role == "other" and not pd.api.types.is_numeric_dtype(table[column]):
+            values = table[column].dropna().astype(str)
+            odd = values[pd.to_numeric(values, errors="coerce").isna()].unique()[:5]
+            entry += f"; entries that are not numbers: {[repr(v) for v in odd]}"
+        parts.append(entry + "]")
     return "; ".join(parts)
 
 
@@ -170,6 +175,8 @@ def merged_pickers(report_b: str) -> str:
     offered = _merged_columns(table, b, "_B")
     detail = (f"{report.matched} of {report.rows_a_with_depth} A samples paired at 2 cm; "
               f"Dataset B columns offered: {offered}")
+    if b.attrs.get("values_not_numeric"):
+        detail += f"; entries read as blanks: {b.attrs['values_not_numeric']}"
     if not offered:
         raise AssertionError(detail + f". Columns of B: {_column_types(b)}")
     return detail

@@ -35,7 +35,10 @@ Restructured from a single-file application into a tested package.
   the requested Hole; the header is now padded and no row is lost.
 - LORE columns with any missing value (JSON null, "NaN", "N/A") were kept as
   text and therefore not offered for plotting; after an IODP merge the Dataset
-  B column menu could be empty. Missing-value markers are now read as blanks.
+  B column menu could be empty. Missing-value markers are now read as blanks,
+  and a measurement column whose values are at least 95% numbers is read as
+  numeric; the other entries are left blank and listed, with examples, in the
+  provenance record (found for P-wave velocity (logger), Expedition 341).
 - Scrolling the page over a chart no longer zooms the chart; zoom with the
   toolbar or a dragged box, and double-click to reset.
 - Acceptance checks list the Dataset B columns offered after IODP merges

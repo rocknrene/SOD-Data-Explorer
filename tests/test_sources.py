@@ -117,6 +117,20 @@ class TestLore:
         assert df["velocity"].tolist()[0] == 1500.5 and pd.isna(df.loc[1, "velocity"])
         assert df["density"].notna().sum() == 2
 
+    def test_rows_to_frame_reads_mostly_numeric_measurements_and_records_the_rest(self):
+        rows = [[f"{1500 + i}", "U1417"] for i in range(40)] + [["see comment", "U1417"]]
+        df = lore.rows_to_frame(rows, ["P-wave velocity xy (m/s)", "Site"])
+        assert pd.api.types.is_numeric_dtype(df["P-wave velocity xy (m/s)"])
+        assert df["P-wave velocity xy (m/s)"].notna().sum() == 40
+        assert df.attrs["values_not_numeric"] == {
+            "P-wave velocity xy (m/s)": {"count": 1, "examples": ["see comment"]}}
+        assert df["Site"].tolist()[0] == "U1417"
+
+    def test_rows_to_frame_keeps_identifiers_with_text_as_text(self):
+        rows = [[str(i)] for i in range(40)] + [["10A"]]
+        df = lore.rows_to_frame(rows, ["Core"])
+        assert not pd.api.types.is_numeric_dtype(df["Core"]) and "values_not_numeric" not in df.attrs
+
     def test_rows_to_frame_keeps_mixed_columns_as_text(self):
         df = lore.rows_to_frame([["1", "A"], ["2", "3"], ["", "4"]], ["n", "mixed"])
         assert df["n"].dtype.kind == "f" and df["mixed"].dtype.kind != "f"

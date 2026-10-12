@@ -37,6 +37,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ..columns import identifier_kind
 from ..provenance import utc_now
 from .catalog import LoreReport, get_report, report_label
 from .common import USER_AGENT, SourceError, describe_request, restrict_to_request, validate_identifier
@@ -90,28 +91,46 @@ def _get_json(session: requests.Session, path: str, params: dict):
 #: Entries that LIMS uses to mark a missing value; they are read as blanks so that
 #: they do not keep an otherwise numeric column from being read as numbers.
 MISSING_MARKERS = frozenset({"nan", "na", "n/a", "null", "none", "-", "--", "---", "*"})
+#: Smallest share of the non-blank values of a measurement column that must be
+#: numbers for the column to be read as numeric (see :func:`rows_to_frame`).
+NUMERIC_SHARE = 0.95
 
 
 def rows_to_frame(rows: list[list], headers: list[str]) -> pd.DataFrame:
     """Convert LORE's list-of-lists rows to a table.
 
     Rows shorter than the widest row are padded with blanks; columns beyond
-    the supplied headers are named ``col_<i>``. A column is converted to
-    numeric only if every non-blank value parses as a number, so that
-    identifier columns with mixed content are preserved as text. Missing-value
-    markers (:data:`MISSING_MARKERS`, such as ``NaN`` or ``N/A``) count as
-    blanks: a single marker would otherwise leave a column of measurements as
-    text, and the column would not be offered for plotting.
+    the supplied headers are named ``col_<i>``. Missing-value markers
+    (:data:`MISSING_MARKERS`, such as ``NaN`` or ``N/A``) count as blanks.
+
+    Identifier and comment columns (see :func:`~sod_explorer.columns.identifier_kind`)
+    are converted to numbers only if every non-blank value is a number, so that
+    mixed identifiers are preserved as text. A measurement column is converted
+    if at least :data:`NUMERIC_SHARE` of its non-blank values are numbers; the
+    remaining entries become blanks, and their number and up to five examples
+    are recorded in ``df.attrs["values_not_numeric"]`` (and from there in the
+    provenance record). Without this, a few stray entries left a whole column
+    of measurements as text, and the column was not offered for plotting.
     """
     width = max(len(r) for r in rows)
     names = list(headers[:width]) + [f"col_{i}" for i in range(len(headers), width)]
     df = pd.DataFrame([list(r) + [""] * (width - len(r)) for r in rows], columns=names)
+    not_numeric: dict[str, dict] = {}
     for column in df.columns:
         text = df[column].astype(str).str.strip()
         nonblank = text.ne("") & ~text.str.lower().isin(MISSING_MARKERS) & df[column].notna()
+        if not nonblank.any():
+            continue
         converted = pd.to_numeric(df[column].where(nonblank), errors="coerce")
-        if nonblank.any() and converted[nonblank].notna().all():
+        failed = nonblank & converted.isna()
+        if not failed.any():
             df[column] = converted
+        elif identifier_kind(column) is None and 1 - failed.sum() / nonblank.sum() >= NUMERIC_SHARE:
+            df[column] = converted
+            not_numeric[str(column)] = {"count": int(failed.sum()),
+                                        "examples": text[failed].unique()[:5].tolist()}
+    if not_numeric:
+        df.attrs["values_not_numeric"] = not_numeric
     return df
 
 
@@ -404,7 +423,9 @@ def _fetch_cached(report: LoreReport, expedition: str, site: str, hole: str) -> 
 
     if not rows:
         raise SourceError(f"LORE returned no {report.code} rows for {where}")
-    df = restrict_to_request(rows_to_frame(rows, headers), expedition, site, hole)
+    frame = rows_to_frame(rows, headers)
+    not_numeric = frame.attrs.get("values_not_numeric", {})
+    df = restrict_to_request(frame, expedition, site, hole)
     if df.empty:
         raise SourceError(f"LORE returned {report.code} rows, but none for {where}")
     if report.transform == "carbonates":
@@ -413,6 +434,8 @@ def _fetch_cached(report: LoreReport, expedition: str, site: str, hole: str) -> 
         definition = report_definition(report.transform.split(":", 1)[1])
         if definition is not None:
             df = assemble_composite(df, definition)
+    if not_numeric:
+        df.attrs["values_not_numeric"] = not_numeric
     return df, name
 
 
@@ -463,7 +486,10 @@ def fetch(report_key: str, expedition: str, site: str = "", hole: str = "") -> t
         if len(report_type.lore_reports) > 1:
             table.insert(0, "LIMS report", lore_report.code)
         tables.append(table)
-        used.append({"code": lore_report.code, "lore_report": name, "rows": int(len(table))})
+        entry = {"code": lore_report.code, "lore_report": name, "rows": int(len(table))}
+        if table.attrs.get("values_not_numeric"):
+            entry["values_not_numeric"] = table.attrs["values_not_numeric"]
+        used.append(entry)
     if not tables:
         raise SourceError("; ".join(errors))
     df = pd.concat(tables, ignore_index=True) if len(tables) > 1 else tables[0]
