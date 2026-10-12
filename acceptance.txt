@@ -1,0 +1,30 @@
+== 1. One Hole
+PASS  DSDP one Hole ('29', '277', '*') (41 s): DSDP density and porosity, Leg 29 (34 rows); 0.00 MB in the browser; 34 rows; depth column 'sample depth (m)'; 5 measurement columns
+PASS  ODP one Hole ('204', '1244', 'C') (1 s): NCEI Moisture and density, Leg 204 (219 rows); 0.00 MB in the browser; 219 rows; depth column 'Depth (mbsf)'; 30 measurement columns
+PASS  IODP one Hole ('362', 'U1480', 'E') (37 s): LORE Moisture and density, Expedition 362 (141 rows); 0.00 MB in the browser; 141 rows; depth column 'Depth CSF-A (m)'; 18 measurement columns
+
+== 2. Entire Leg or Expedition
+PASS  DSDP entire Leg/Expedition 29 (6 s): DSDP density and porosity, Leg 29 (198 rows); 0.00 MB in the browser; 198 rows; depth column 'sample depth (m)'; 5 measurement columns
+PASS  ODP entire Leg/Expedition 204 (20 s): NCEI Moisture and density, Leg 204 (1,399 rows); 0.00 MB in the browser; 1399 rows; depth column 'Depth (mbsf)'; 30 measurement columns
+PASS  IODP entire Leg/Expedition 362 (234 s): LORE Moisture and density, Expedition 362 (1,117 rows); 0.00 MB in the browser; 1117 rows; depth column 'Depth CSF-A (m)'; 18 measurement columns
+
+== 3. Merges
+PASS  merge DSDP with DSDP (6 s): mad with pwave_split: 12 of 34 A samples paired (depths 'sample depth (m)' and 'sample depth (m)'; scales None and None; grouping hole)
+PASS  merge ODP with ODP (1 s): mad with carbonates: 43 of 219 A samples paired (depths 'Depth (mbsf)' and 'Depth (mbsf)'; scales mbsf and mbsf; grouping hole)
+PASS  merge IODP with IODP (43 s): mad with carbonates: 48 of 141 A samples paired (depths 'Depth CSF-A (m)' and 'Depth CSF-A (m)'; scales CSF-A and CSF-A; grouping hole)
+PASS  merge DSDP with IODP (0 s): mad with mad: 14 of 34 A samples paired (depths 'sample depth (m)' and 'Depth CSF-A (m)'; scales None and CSF-A; grouping none)
+PASS  merge ODP with IODP (0 s): mad with mad: 73 of 219 A samples paired (depths 'Depth (mbsf)' and 'Depth CSF-A (m)'; scales mbsf and CSF-A; grouping none)
+PASS  merge DSDP with ODP (0 s): mad with mad: 24 of 34 A samples paired (depths 'sample depth (m)' and 'Depth (mbsf)'; scales None and mbsf; grouping none)
+
+== 4. Charts
+PASS  depth tracks and cross-plot, single dataset (0 s): tracks: 2 traces; cross-plot: 2 traces; title 'r = 0.983, r² = 0.966, n = 141, n_eff = 18.0<br>p = 3.6e-13, 95% CI [0.95, 0.99]<br><sup>p and CI use n_eff adjusted for lag-1 autocorrelation<br>(Bretherton et al., 1999)</sup>'
+PASS  depth tracks and cross-plot, merged dataset (0 s): depth 'merge depth CSF-A (m)'; 'Moisture dry (wt%)_A' against 'Inorganic carbon (wt%)_B'; tracks: 2 traces; cross-plot title 'Detrended residuals: r = 0.534, r² = 0.286, n = 25, n_eff = 20.5<br>p = 0.014, 95% CI [0.13, 0.79]<br><sup>p and CI use n_eff adjusted for lag-1 autocorrelation<br>(Bretherton et al., 1999)</sup>'
+
+== 5. Dataset B columns offered after an IODP merge (341-U1417-A, moisture and density as A)
+PASS  merge with pwave_logger (63 s): 57 of 58 A samples paired at 2 cm; Dataset B columns offered: ['Caliper separation (mm)_B', 'Sonic traveltime (µs)_B']; entries read as blanks: {'Caliper separation (mm)': {'count': 7, 'examples': ['¿']}, 'Sonic traveltime (µs)': {'count': 7, 'examples': ['¿']}}
+PASS  merge with pwave_split (8 s): 0 of 58 A samples paired at 2 cm; Dataset B columns offered: ['P-wave velocity x (m/s)_B', 'Caliper separation (mm)_B', 'Sonic traveltime (µs)_B', 'P-wave velocity x [manual] (m/s)_B', 'Sonic traveltime [manual] (µs)_B']
+PASS  merge with gra (71 s): 58 of 58 A samples paired at 2 cm; Dataset B columns offered: ['Bulk density (GRA)_B']
+PASS  merge with ngr (23 s): 25 of 58 A samples paired at 2 cm; Dataset B columns offered: ['NGR total counts (cps)_B', 'Error (cps)_B', 'Relative Error_B']
+PASS  merge with carbonates (9 s): 0 of 58 A samples paired at 2 cm; Dataset B columns offered: ['Inorganic carbon (wt%)_B', 'Calcium carbonate (wt%)_B', 'Total carbon (wt%)_B', 'Organic carbon (wt%) by difference (CHNS-COUL)_B', 'Hydrogen (wt%)_B', 'Nitrogen (wt%)_B', 'Sulfur (wt%)_B']
+
+0 of 19 check(s) failed.
