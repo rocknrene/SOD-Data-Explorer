@@ -33,6 +33,13 @@ Restructured from a single-file application into a tested package.
 - NCEI files whose data lines have more fields than their header (Leg 204
   interstitial water) were read with every column shifted, so no row matched
   the requested Hole; the header is now padded and no row is lost.
+- LORE columns with any missing value (JSON null, "NaN", "N/A") were kept as
+  text and therefore not offered for plotting; after an IODP merge the Dataset
+  B column menu could be empty. Missing-value markers are now read as blanks.
+- Scrolling the page over a chart no longer zooms the chart; zoom with the
+  toolbar or a dragged box, and double-click to reset.
+- Acceptance checks list the Dataset B columns offered after IODP merges
+  (Expedition 341, Hole U1417A), with the type of every column of B.
 
 ### Report types (data-type table by L. Childress)
 - Report menu rebuilt from the cross-program "SOD Data Types" table: sixteen

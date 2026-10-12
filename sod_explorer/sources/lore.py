@@ -87,20 +87,28 @@ def _get_json(session: requests.Session, path: str, params: dict):
     return response.json()
 
 
+#: Entries that LIMS uses to mark a missing value; they are read as blanks so that
+#: they do not keep an otherwise numeric column from being read as numbers.
+MISSING_MARKERS = frozenset({"nan", "na", "n/a", "null", "none", "-", "--", "---", "*"})
+
+
 def rows_to_frame(rows: list[list], headers: list[str]) -> pd.DataFrame:
     """Convert LORE's list-of-lists rows to a table.
 
     Rows shorter than the widest row are padded with blanks; columns beyond
     the supplied headers are named ``col_<i>``. A column is converted to
     numeric only if every non-blank value parses as a number, so that
-    identifier columns with mixed content are preserved as text.
+    identifier columns with mixed content are preserved as text. Missing-value
+    markers (:data:`MISSING_MARKERS`, such as ``NaN`` or ``N/A``) count as
+    blanks: a single marker would otherwise leave a column of measurements as
+    text, and the column would not be offered for plotting.
     """
     width = max(len(r) for r in rows)
     names = list(headers[:width]) + [f"col_{i}" for i in range(len(headers), width)]
     df = pd.DataFrame([list(r) + [""] * (width - len(r)) for r in rows], columns=names)
     for column in df.columns:
         text = df[column].astype(str).str.strip()
-        nonblank = text.ne("")
+        nonblank = text.ne("") & ~text.str.lower().isin(MISSING_MARKERS) & df[column].notna()
         converted = pd.to_numeric(df[column].where(nonblank), errors="coerce")
         if nonblank.any() and converted[nonblank].notna().all():
             df[column] = converted

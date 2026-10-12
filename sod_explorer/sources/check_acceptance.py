@@ -22,7 +22,12 @@ Checks
    :func:`sod_explorer.analysis.merge_by_depth`).
 4. Depth tracks and the cross-plot with correlation, for a single dataset
    and for a merged dataset.
-5. With ``--all-types``, every report type for one Hole of each program
+5. Column pickers of merged IODP datasets: for each pairing tested by
+   L. Childress (Expedition 341, Hole U1417A, moisture and density as A),
+   the Dataset B columns the application offers, with the type of each
+   column of B, so that a dataset whose columns are not offered can be
+   diagnosed.
+6. With ``--all-types``, every report type for one Hole of each program
    (informative: a report type with no data for the Hole is listed as
    ``none`` and is not a failure).
 
@@ -38,14 +43,18 @@ import traceback
 import pandas as pd
 
 from ..analysis import merge_by_depth
-from ..callbacks import from_store, to_store
-from ..columns import find_depth_column, measurement_columns
+from ..callbacks import _merged_columns, from_store, to_store
+from ..columns import depth_columns, find_depth_column, identifier_kind, measurement_columns
 from ..plotting import correlation_figure, tracks_figure
 from . import routing
 from .catalog import REPORT_TYPES
 
 #: One Hole of each program: (Leg/Expedition, Site, Hole).
 HOLE = {"DSDP": ("29", "277", "*"), "ODP": ("204", "1244", "C"), "IODP": ("362", "U1480", "E")}
+#: Hole and report types of the IODP merges whose Dataset B columns are checked (part 5).
+PICKER_HOLE = ("341", "U1417", "A")
+PICKER_B_REPORTS = ("pwave_logger", "pwave_split", "gra", "ngr", "carbonates")
+APP_TOLERANCE_M = 0.02      # the application's default tolerance (2 cm)
 #: Two report types measured in that Hole, for merging within a program.
 PAIR = {"DSDP": ("mad", "pwave_split"), "ODP": ("mad", "carbonates"), "IODP": ("mad", "carbonates")}
 WITHIN_TOLERANCE_M = 0.5
@@ -140,9 +149,35 @@ def charts_merged() -> str:
             f"traces; cross-plot title {cross.layout.title.text!r}")
 
 
+def _column_types(table: pd.DataFrame) -> str:
+    """Each column of a table with its type and role, for diagnosing the column pickers."""
+    depths = set(depth_columns(table))
+    measures = set(measurement_columns(table))
+    parts = []
+    for column in table.columns:
+        role = ("measurement" if column in measures else "depth" if column in depths
+                else f"identifier:{identifier_kind(column)}" if identifier_kind(column) else "other")
+        parts.append(f"{column!r} [{table[column].dtype}, {role}, {int(table[column].notna().sum())} values]")
+    return "; ".join(parts)
+
+
+def merged_pickers(report_b: str) -> str:
+    """Merge as the application does and list the Dataset B columns it would offer."""
+    a, b = load("mad", *PICKER_HOLE), load(report_b, *PICKER_HOLE)
+    table, report = merge_by_depth(a, b, find_depth_column(a), find_depth_column(b),
+                                   tolerance_m=APP_TOLERANCE_M, one_to_one=True)
+    table = from_store(to_store(table))
+    offered = _merged_columns(table, b, "_B")
+    detail = (f"{report.matched} of {report.rows_a_with_depth} A samples paired at 2 cm; "
+              f"Dataset B columns offered: {offered}")
+    if not offered:
+        raise AssertionError(detail + f". Columns of B: {_column_types(b)}")
+    return detail
+
+
 def main() -> None:
     if "--all-types" in sys.argv:
-        print("== 5. Every report type, one Hole of each program (informative)")
+        print("== 6. Every report type, one Hole of each program (informative)")
         for program in HOLE:
             for report in REPORT_TYPES:
                 run(f"{program} {report.label}", lambda p=program, r=report: describe(load(r.key, *HOLE[p])),
@@ -162,6 +197,10 @@ def main() -> None:
     print("\n== 4. Charts")
     run("depth tracks and cross-plot, single dataset", charts_single)
     run("depth tracks and cross-plot, merged dataset", charts_merged)
+    print(f"\n== 5. Dataset B columns offered after an IODP merge ({'-'.join(PICKER_HOLE)}, "
+          "moisture and density as A)")
+    for report_b in PICKER_B_REPORTS:
+        run(f"merge with {report_b}", lambda r=report_b: merged_pickers(r))
 
     failures = [name for name, ok in _results if not ok]
     print(f"\n{len(failures)} of {len(_results)} check(s) failed"

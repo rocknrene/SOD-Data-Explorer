@@ -149,6 +149,12 @@ def busy_message(text: str = "Working on it. Retrieving a whole Leg or Expeditio
 
 BUSY_OVERLAY = {"visibility": "visible", "opacity": 0.35}
 
+# Zooming with the scroll wheel is off: with it on, scrolling the page while the
+# pointer is over a chart zoomed the chart instead (the depth axis of a 165 m hole
+# could end up spanning -250 to 250 m). Zoom with the toolbar or by dragging a box;
+# double-click resets the view.
+GRAPH_CONFIG = {"displayModeBar": True, "scrollZoom": False, "doubleClick": "reset"}
+
 
 def upload_dropzone(component_id: str, label: str, accepted: str, compact: bool = False,
                     accent: str = "var(--accent)") -> dcc.Upload:
@@ -301,7 +307,7 @@ def shipboard_tab() -> html.Div:
                                               "borderBottom": "1px solid var(--border)",
                                               "flexWrap": "wrap"}),
                 html.Div(dcc.Loading(dcc.Graph(id="main-chart",
-                                               config={"displayModeBar": True, "scrollZoom": True}),
+                                               config=GRAPH_CONFIG),
                                      custom_spinner=busy_message(), overlay_style=BUSY_OVERLAY,
                                      delay_show=400),
                          style={"padding": "10px 18px"}),
@@ -514,7 +520,7 @@ def legacy_tab() -> html.Div:
             # (whose output is a store) also shows it.
             dcc.Loading(
                 children=[
-                    dcc.Graph(id="pe-chart", config={"displayModeBar": True, "scrollZoom": True}),
+                    dcc.Graph(id="pe-chart", config=GRAPH_CONFIG),
                     html.Div(id="pe-table-container", style={"marginTop": "16px"}),
                     dcc.Store(id="pe-store-a"), dcc.Store(id="pe-store-b"), dcc.Store(id="pe-merged-store"),
                 ],

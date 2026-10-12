@@ -107,6 +107,16 @@ class TestLore:
         assert df["LIMS report"].value_counts().to_dict() == {"PWC": 2, "PWB": 2}
         assert [r["code"] for r in source["query"]["lims_reports"]] == ["PWC", "PWB"]
 
+    def test_rows_to_frame_reads_columns_with_missing_values_as_numbers(self):
+        # LORE sends JSON null (None) and LIMS uses markers such as "NaN" for missing values;
+        # either one previously left a whole column of measurements as text, so it was not
+        # offered for plotting (Dataset B columns empty after an IODP merge).
+        df = lore.rows_to_frame([["1500.5", "1.2"], [None, "NaN"], ["1510", "N/A"], ["", "1.4"]],
+                                ["velocity", "density"])
+        assert pd.api.types.is_numeric_dtype(df["velocity"]) and pd.api.types.is_numeric_dtype(df["density"])
+        assert df["velocity"].tolist()[0] == 1500.5 and pd.isna(df.loc[1, "velocity"])
+        assert df["density"].notna().sum() == 2
+
     def test_rows_to_frame_keeps_mixed_columns_as_text(self):
         df = lore.rows_to_frame([["1", "A"], ["2", "3"], ["", "4"]], ["n", "mixed"])
         assert df["n"].dtype.kind == "f" and df["mixed"].dtype.kind != "f"
